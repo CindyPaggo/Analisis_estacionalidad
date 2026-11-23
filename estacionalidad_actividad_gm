@@ -1,0 +1,420 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.seasonal import STL
+
+
+# ==========================================================
+# 1. Configuración
+# ==========================================================
+
+meses = {
+    1: "Enero",
+    2: "Febrero",
+    3: "Marzo",
+    4: "Abril",
+    5: "Mayo",
+    6: "Junio",
+    7: "Julio",
+    8: "Agosto",
+    9: "Septiembre",
+    10: "Octubre",
+    11: "Noviembre",
+    12: "Diciembre"
+}
+
+FECHA_INICIO = "2023-01-01"
+FECHA_FIN = "2026-11-01"  # límite exclusivo: incluye hasta octubre 2026
+
+MIN_MESES = 30
+MIN_NEGOCIOS = 5
+
+
+# ==========================================================
+# 2. Preparar una copia de los datos
+# ==========================================================
+
+d = df.copy()
+
+d["Fecha"] = pd.to_datetime(
+    d["Fecha"],
+    errors="coerce"
+)
+
+d["TRX"] = pd.to_numeric(
+    d["TRX"],
+    errors="coerce"
+)
+
+d["Actividad"] = (
+    d["Actividad"]
+    .astype("string")
+    .str.strip()
+)
+
+
+# ==========================================================
+# 3. Buscar actividades automotrices y de transporte
+# ==========================================================
+
+mascara_automotriz_transporte = (
+    d["Actividad"]
+    .str.contains(
+        r"automotriz|transporte",
+        case=False,
+        na=False,
+        regex=True
+    )
+)
+
+actividades_encontradas = (
+    d.loc[
+        mascara_automotriz_transporte,
+        "Actividad"
+    ]
+    .value_counts(dropna=False)
+    .rename_axis("Actividad")
+    .reset_index(name="CantidadRegistros")
+)
+
+print("Actividades incluidas en el análisis:")
+
+display(actividades_encontradas)
+
+
+# ==========================================================
+# 4. Crear tabla filtrada
+# ==========================================================
+
+df_automotriz_transporte = d.loc[
+    mascara_automotriz_transporte
+].copy()
+
+print(
+    f"Variantes de actividad encontradas: "
+    f"{df_automotriz_transporte['Actividad'].nunique():,}"
+)
+
+print(
+    f"Registros encontrados: "
+    f"{len(df_automotriz_transporte):,}"
+)
+
+print(
+    f"Negocios únicos: "
+    f"{df_automotriz_transporte['NegocioId'].nunique():,}"
+)
+
+print(
+    f"Total de transacciones: "
+    f"{df_automotriz_transporte['TRX'].sum():,.0f}"
+)
+
+
+# ==========================================================
+# 5. Resumen por cada actividad encontrada
+# ==========================================================
+
+resumen_actividades = (
+    df_automotriz_transporte
+    .groupby(
+        "Actividad",
+        dropna=False
+    )
+    .agg(
+        NegociosUnicos=("NegocioId", "nunique"),
+        Registros=("NegocioId", "size"),
+        TotalTRX=("TRX", "sum"),
+        PrimeraFecha=("Fecha", "min"),
+        UltimaFecha=("Fecha", "max")
+    )
+    .reset_index()
+    .sort_values(
+        "TotalTRX",
+        ascending=False
+    )
+    .reset_index(drop=True)
+)
+
+print("Resumen de las actividades incluidas:")
+
+display(resumen_actividades)
+
+
+# ==========================================================
+# 6. Filtrar el periodo de análisis
+# ==========================================================
+
+base = df_automotriz_transporte[
+    (df_automotriz_transporte["Fecha"] >= FECHA_INICIO)
+    & (df_automotriz_transporte["Fecha"] < FECHA_FIN)
+].copy()
+
+base = base.dropna(
+    subset=[
+        "Fecha",
+        "TRX",
+        "NegocioId"
+    ]
+)
+
+base["Periodo"] = (
+    base["Fecha"]
+    .dt.to_period("M")
+)
+
+if base.empty:
+    raise ValueError(
+        "No existen registros de Automotriz y Transporte "
+        "en el periodo seleccionado."
+    )
+
+
+# ==========================================================
+# 7. Consolidar todas las actividades encontradas
+# ==========================================================
+
+mensual = (
+    base.groupby(
+        "Periodo",
+        as_index=False
+    )
+    .agg(
+        TRX=("TRX", "sum"),
+        Negocios=("NegocioId", "nunique")
+    )
+    .sort_values("Periodo")
+)
+
+print("Primeros meses de la serie consolidada:")
+
+display(mensual.head())
+
+
+# ==========================================================
+# 8. Crear el calendario mensual completo
+# ==========================================================
+
+todos = pd.period_range(
+    start="2023-01",
+    end="2026-10",
+    freq="M"
+)
+
+mensual = (
+    mensual
+    .set_index("Periodo")
+    .reindex(todos)
+)
+
+mensual.index.name = "Periodo"
+
+
+# ==========================================================
+# 9. Identificar el periodo real disponible
+# ==========================================================
+
+meses_con_datos = mensual["TRX"].dropna()
+
+if meses_con_datos.empty:
+    raise ValueError(
+        "No se encontraron meses con información para las "
+        "actividades automotrices y de transporte."
+    )
+
+primer_mes = meses_con_datos.index.min()
+ultimo_mes = meses_con_datos.index.max()
+
+mensual = mensual.loc[
+    primer_mes:ultimo_mes
+].copy()
+
+print(f"Primer mes analizado: {primer_mes}")
+print(f"Último mes analizado: {ultimo_mes}")
+print(f"Cantidad de meses: {len(mensual)}")
+
+
+# ==========================================================
+# 10. Validaciones
+# ==========================================================
+
+if len(mensual) < MIN_MESES:
+    raise ValueError(
+        f"La serie solamente tiene {len(mensual)} meses. "
+        f"Se requieren al menos {MIN_MESES} meses."
+    )
+
+
+# Detectar meses que no aparecen en los datos
+meses_faltantes = mensual[
+    mensual[["TRX", "Negocios"]]
+    .isna()
+    .any(axis=1)
+]
+
+if not meses_faltantes.empty:
+    print("Se encontraron meses sin información:")
+
+    display(meses_faltantes)
+
+    raise ValueError(
+        "La serie tiene meses faltantes. "
+        "STL requiere una serie mensual continua."
+    )
+
+
+promedio_negocios = mensual["Negocios"].mean()
+
+if promedio_negocios < MIN_NEGOCIOS:
+    raise ValueError(
+        f"El promedio mensual es de "
+        f"{promedio_negocios:.1f} negocios. "
+        f"Se requieren al menos {MIN_NEGOCIOS}."
+    )
+
+
+if (mensual["Negocios"] <= 0).any():
+    raise ValueError(
+        "Existen meses con cero negocios activos."
+    )
+
+
+if (mensual["TRX"] < 0).any():
+    raise ValueError(
+        "Existen valores negativos en TRX. "
+        "Revise los datos antes de aplicar log1p."
+    )
+
+
+# ==========================================================
+# 11. Calcular TRX por negocio activo
+# ==========================================================
+
+mensual["TRXporNegocio"] = (
+    mensual["TRX"]
+    / mensual["Negocios"]
+)
+
+print("Serie mensual preparada:")
+
+display(mensual.head())
+
+
+# ==========================================================
+# 12. Aplicar STL
+# ==========================================================
+
+resultados = []
+modelos = {}
+patrones_mensuales = {}
+
+for columna in ["TRX", "TRXporNegocio"]:
+
+    # log1p permite transformar valores iguales a cero
+    serie = np.log1p(
+        mensual[columna]
+    )
+
+    # Convertir PeriodIndex a DatetimeIndex
+    serie.index = (
+        serie.index
+        .to_timestamp()
+    )
+
+    # MS significa inicio de mes
+    serie = serie.asfreq("MS")
+
+
+    # Validaciones finales
+    if serie.isna().any():
+        print(
+            f"La serie {columna} contiene valores faltantes."
+        )
+        continue
+
+    if not np.isfinite(serie).all():
+        print(
+            f"La serie {columna} contiene valores no válidos."
+        )
+        continue
+
+
+    # Descomposición STL con estacionalidad anual
+    modelo = STL(
+        serie,
+        period=12,
+        robust=True
+    ).fit()
+
+    modelos[columna] = modelo
+
+
+    # Calcular fuerza de la estacionalidad
+    denominador = (
+        modelo.seasonal
+        + modelo.resid
+    ).var()
+
+    if denominador > 0:
+        fuerza = max(
+            0,
+            1 - modelo.resid.var() / denominador
+        )
+    else:
+        fuerza = 0
+
+
+    # Efecto estacional promedio para cada mes
+    estacionalidad_por_mes = (
+        modelo.seasonal
+        .groupby(
+            modelo.seasonal.index.month
+        )
+        .mean()
+        .reindex(range(1, 13))
+    )
+
+    patrones_mensuales[columna] = (
+        estacionalidad_por_mes
+    )
+
+
+    mes_pico_numero = int(
+        estacionalidad_por_mes.idxmax()
+    )
+
+    mes_valle_numero = int(
+        estacionalidad_por_mes.idxmin()
+    )
+
+
+    resultados.append({
+        "Actividad": "Automotriz y Transporte consolidado",
+        "Serie": columna,
+        "Meses": len(mensual),
+        "NegociosPromedio": round(
+            promedio_negocios,
+            1
+        ),
+        "FuerzaEstacional": round(
+            fuerza,
+            2
+        ),
+        "MesPico": meses[
+            mes_pico_numero
+        ],
+        "MesValle": meses[
+            mes_valle_numero
+        ]
+    })
+
+
+# ==========================================================
+# 13. Mostrar resultados
+# ==========================================================
+
+res = pd.DataFrame(resultados)
+
+print("Resultados del análisis estacional:")
+
+display(res)
